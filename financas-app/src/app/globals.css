@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+/**
+ * Tema dark default. Paleta da spec §9.
+ * Tons quentes (off-black com toque amarelo, não cinza-azulado).
+ *
+ * As fontes apontam para variáveis CSS que o next/font vai injetar no
+ * <html> quando criarmos o layout (sub-bloco 1.5). Até lá, caem nos
+ * fallbacks de sistema definidos abaixo.
+ */
+@theme {
+  /* Superfícies e texto */
+  --color-background: #0E0E0C;
+  --color-surface: #161614;
+  --color-foreground: #F5F1E8;
+  --color-muted: #1F1F1C;
+  --color-muted-foreground: #9A9489;
+  --color-border: #2A2A26;
+  --color-ring: #D4A574;
+
+  /* Acentos */
+  --color-positive: #7FB069;
+  --color-negative: #C44536;
+  --color-neutral: #D4A574;
+
+  /* Famílias de fonte (preenchidas pelo next/font no layout) */
+  --font-display: var(--font-fraunces), ui-serif, Georgia, serif;
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Raios. shadcn referencia esses nomes. */
+  --radius: 0.5rem;
+}
+
+/* Reset mínimo — defaults aplicados ao body inteiro */
+@layer base {
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Números em colunas de valor: monoespaçados e tabulares
+     (todos os dígitos com mesma largura, pra alinharem) */
+  .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}

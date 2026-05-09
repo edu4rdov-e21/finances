@@ -1,0 +1,33 @@
+# Dependências
+node_modules/
+
+# Builds
+.next/
+out/
+build/
+dist/
+
+# Variáveis de ambiente (NUNCA commitar)
+.env
+.env.local
+.env*.local
+
+# Banco de dados local + backups (dados pessoais!)
+data/
+backups/
+*.db
+*.db-journal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
