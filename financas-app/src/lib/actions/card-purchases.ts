@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { ulid } from 'ulid';
-import { addMonths, format } from 'date-fns';
+import { addMonths, format, parseISO } from 'date-fns';
 import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '@/db/client';
@@ -13,7 +13,9 @@ const ISO_DATE = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Data deve ser YYYY-MM-DD');
 
-export const createCardPurchaseSchema = z.object({
+// Schema interno — Next.js 'use server' files só permitem export de async funcs.
+// Tipos (export type abaixo) somem em runtime, então passam.
+const createCardPurchaseSchema = z.object({
   accountId: z.string().min(1, 'Cartão obrigatório'),
   categoryId: z.string().min(1, 'Categoria obrigatória'),
   description: z.string().trim().min(1, 'Descrição obrigatória').max(200),
@@ -87,7 +89,8 @@ export async function createCardPurchase(
   );
 
   const purchaseId = ulid();
-  const baseDate = new Date(parsed.data.firstInstallmentDate);
+  // parseISO em vez de new Date pra evitar shift de fuso UTC→local
+  const baseDate = parseISO(parsed.data.firstInstallmentDate);
   const isMulti = parsed.data.installments > 1;
 
   db.transaction((tx) => {

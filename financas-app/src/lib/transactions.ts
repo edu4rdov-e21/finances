@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { and, desc, eq, gte, lte, like, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, like, type SQL } from 'drizzle-orm';
+import { format } from 'date-fns';
 import { db, schema } from '@/db/client';
 
 /**
@@ -136,6 +137,41 @@ export function listTransactions(
     )
     .where(where)
     .orderBy(desc(schema.transactions.date), desc(schema.transactions.createdAt))
+    .all();
+}
+
+/**
+ * Próximas N transactions a partir de hoje (date >= today, ordem asc).
+ * Pra lista lateral do Dashboard ("o que vem aí").
+ */
+export function listUpcomingTransactions(limit = 10): TransactionRow[] {
+  const todayIso = format(new Date(), 'yyyy-MM-dd');
+  return db
+    .select({
+      id: schema.transactions.id,
+      date: schema.transactions.date,
+      amount: schema.transactions.amount,
+      kind: schema.transactions.kind,
+      description: schema.transactions.description,
+      notes: schema.transactions.notes,
+      status: schema.transactions.status,
+      accountId: schema.transactions.accountId,
+      accountName: schema.accounts.name,
+      categoryId: schema.transactions.categoryId,
+      categoryName: schema.categories.name,
+    })
+    .from(schema.transactions)
+    .leftJoin(
+      schema.accounts,
+      eq(schema.transactions.accountId, schema.accounts.id)
+    )
+    .leftJoin(
+      schema.categories,
+      eq(schema.transactions.categoryId, schema.categories.id)
+    )
+    .where(gte(schema.transactions.date, todayIso))
+    .orderBy(asc(schema.transactions.date))
+    .limit(limit)
     .all();
 }
 

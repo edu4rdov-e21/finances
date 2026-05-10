@@ -13,10 +13,13 @@ import {
 import { listAccounts, listCategories } from '@/lib/accounts';
 import { formatDateShort, formatTxAmount } from '@/lib/format';
 import { cn } from '@/lib/utils';
+import Link from 'next/link';
+import { Upload } from 'lucide-react';
 import { NewTransactionDialog } from '@/components/new-transaction-dialog';
 import { TransactionFilters } from '@/components/transaction-filters';
 import { CategoryCell } from '@/components/category-cell';
 import { DeleteTransactionButton } from '@/components/delete-transaction-button';
+import { buttonVariants } from '@/components/ui/button';
 import { ensureRecurringGenerated } from '@/lib/boot';
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
@@ -48,7 +51,16 @@ export default async function LancamentosPage({
             Toda entrada e saída registrada no app.
           </p>
         </div>
-        <NewTransactionDialog accounts={accounts} categories={categories} />
+        <div className="flex items-center gap-2">
+          <Link
+            href="/importar"
+            className={buttonVariants({ variant: 'outline' })}
+          >
+            <Upload />
+            Importar extrato
+          </Link>
+          <NewTransactionDialog accounts={accounts} categories={categories} />
+        </div>
       </div>
 
       <TransactionFilters accounts={accounts} categories={categories} />

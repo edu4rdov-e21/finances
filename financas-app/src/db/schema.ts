@@ -59,7 +59,7 @@ export const cardPurchases = sqliteTable('card_purchases', {
 export const importBatches = sqliteTable('import_batches', {
   id: text('id').primaryKey(),
   accountId: text('account_id').notNull().references(() => accounts.id),
-  source: text('source', { enum: ['pdf', 'csv', 'ofx'] }).notNull(),
+  source: text('source', { enum: ['pdf', 'csv', 'ofx', 'md'] }).notNull(),
   filename: text('filename').notNull(),
   importedAt: text('imported_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   totalRows: integer('total_rows').notNull().default(0),
