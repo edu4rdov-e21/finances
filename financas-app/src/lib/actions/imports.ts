@@ -13,14 +13,11 @@ import {
   buildImportPreview,
   type ImportPreviewItem,
 } from '@/lib/import';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import type { ParsedRawTx } from '@/lib/parsers/types';
 import type { ActionResult } from './types';
 
 const SOURCE = z.enum(['csv', 'ofx', 'pdf', 'md']);
-
-// Em arquivos com 'use server', SÓ funções async podem ser exportadas.
-// Schemas Zod (que são objects) e ITEM_KIND (z.enum) ficam const interno.
-// Tipos (export type) são apagados em runtime, então passam.
 
 const previewImportSchema = z.object({
   content: z.string().min(1, 'Arquivo vazio'),
@@ -40,9 +37,7 @@ const confirmImportItemSchema = z.object({
   normalizedDescription: z.string().min(1),
   amountCents: z.number().int().positive(),
   kind: ITEM_KIND,
-  /** null = sem categoria; usuário pode confirmar sem categorizar */
   categoryId: z.string().min(1).nullable(),
-  /** Categoria sugerida originalmente — null se não houve sugestão */
   originalSuggestedCategoryId: z.string().min(1).nullable(),
 });
 
@@ -63,9 +58,6 @@ function revalidateImports() {
   }
 }
 
-/**
- * Lê arquivo, parseia, monta preview anotado, persiste batch pending_review.
- */
 export async function previewImport(
   input: PreviewImportInput
 ): Promise<
@@ -80,12 +72,18 @@ export async function previewImport(
     };
   }
 
-  // Validar conta
-  const account = db
+  const workspaceId = await requireActiveWorkspaceId();
+
+  const [account] = await db
     .select()
     .from(schema.accounts)
-    .where(eq(schema.accounts.id, parsed.data.accountId))
-    .get();
+    .where(
+      and(
+        eq(schema.accounts.workspaceId, workspaceId),
+        eq(schema.accounts.id, parsed.data.accountId)
+      )
+    )
+    .limit(1);
   if (!account) {
     return {
       ok: false,
@@ -94,9 +92,6 @@ export async function previewImport(
     };
   }
 
-  // Parser por source. PDF passa por LLM; CSV/OFX são parsers locais.
-  // PDF parse falhar é fatal (sem parse, não há preview). CSV/OFX falhar
-  // por arquivo malformado também é fatal.
   let rawTxs: ParsedRawTx[];
   try {
     if (parsed.data.source === 'pdf') {
@@ -126,43 +121,32 @@ export async function previewImport(
     };
   }
 
-  // Pipeline base (hash, dedup, parcelas, learnings local)
-  const items = buildImportPreview({
+  const items = await buildImportPreview({
+    workspaceId,
     parsed: rawTxs,
     accountId: parsed.data.accountId,
   });
 
-  // Categorização Anthropic — só pros items que não casaram com learnings.
-  // Falha aqui é silenciosa: o usuário categoriza manualmente no preview.
-  await applyAnthropicCategorization(items);
+  await applyAnthropicCategorization(workspaceId, items);
 
-  // Cria batch
   const batchId = ulid();
-  db.insert(schema.importBatches)
-    .values({
-      id: batchId,
-      accountId: parsed.data.accountId,
-      source: parsed.data.source,
-      filename: parsed.data.filename,
-      totalRows: items.length,
-      status: 'pending_review',
-    })
-    .run();
+  await db.insert(schema.importBatches).values({
+    id: batchId,
+    workspaceId,
+    accountId: parsed.data.accountId,
+    source: parsed.data.source,
+    filename: parsed.data.filename,
+    totalRows: items.length,
+    status: 'pending_review',
+  });
 
   return { ok: true, data: { batchId, items } };
 }
 
-/**
- * Categorização via Anthropic pra items sem sugestão local.
- * Mutação in-place: preenche `suggestedCategoryId` nos items aplicáveis.
- *
- * Falhas são silenciosas — graceful degradation. Items continuam sem
- * sugestão; usuário categoriza manualmente no preview.
- */
 async function applyAnthropicCategorization(
+  workspaceId: string,
   items: ImportPreviewItem[]
 ): Promise<void> {
-  // Pares (item, posição original em items[]) sem sugestão ainda.
   const needCategory: Array<{
     item: ImportPreviewItem;
     originalIndex: number;
@@ -174,11 +158,15 @@ async function applyAnthropicCategorization(
   }
   if (needCategory.length === 0) return;
 
-  const categoriesRaw = db
+  const categoriesRaw = await db
     .select()
     .from(schema.categories)
-    .where(eq(schema.categories.archived, 0))
-    .all();
+    .where(
+      and(
+        eq(schema.categories.workspaceId, workspaceId),
+        eq(schema.categories.archived, 0)
+      )
+    );
 
   if (categoriesRaw.length === 0) return;
 
@@ -188,7 +176,6 @@ async function applyAnthropicCategorization(
     kind: c.kind,
   }));
 
-  // Indexa categorias por id pra checagem de kind compatível depois.
   const categoryById = new Map(categoriesRaw.map((c) => [c.id, c]));
 
   const categorizationInputs = needCategory.map(({ item }, idx) => ({
@@ -209,25 +196,15 @@ async function applyAnthropicCategorization(
       if (!sug) continue;
       const cat = categoryById.get(sug.categoryId);
       if (!cat) continue;
-      // Defesa final: kind tem que bater (LLM pode ocasionalmente sugerir
-      // categoria expense pra item income — defesa em camadas)
       if (cat.kind !== needCategory[idx].item.kind) continue;
 
       needCategory[idx].item.suggestedCategoryId = sug.categoryId;
     }
   } catch (err) {
-    // Graceful degradation: logamos, mas o preview continua sem sugestões
-    // automáticas. Usuário categoriza manualmente.
     console.error('[previewImport] Anthropic categorization failed:', err);
   }
 }
 
-/**
- * Confirma a importação. Atomic:
- *  1. Insere as transactions
- *  2. Atualiza category_learnings (aprende com correções e confirmações)
- *  3. Marca batch como confirmed
- */
 export async function confirmImport(
   input: ConfirmImportInput
 ): Promise<
@@ -242,11 +219,18 @@ export async function confirmImport(
     };
   }
 
-  const batch = db
+  const workspaceId = await requireActiveWorkspaceId();
+
+  const [batch] = await db
     .select()
     .from(schema.importBatches)
-    .where(eq(schema.importBatches.id, parsed.data.batchId))
-    .get();
+    .where(
+      and(
+        eq(schema.importBatches.workspaceId, workspaceId),
+        eq(schema.importBatches.id, parsed.data.batchId)
+      )
+    )
+    .limit(1);
   if (!batch) {
     return { ok: false, error: 'Batch de importação não encontrado' };
   }
@@ -262,95 +246,93 @@ export async function confirmImport(
   let created = 0;
   let learningsUpdated = 0;
 
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     for (const item of parsed.data.items) {
-      tx.insert(schema.transactions)
-        .values({
-          id: ulid(),
-          accountId: batch.accountId,
-          categoryId: item.categoryId,
-          date: item.date,
-          amount: item.amountCents,
-          kind: item.kind,
-          description: item.rawDescription,
-          externalHash: item.externalHash,
-          importBatchId: batch.id,
-          status: 'confirmed',
-        })
-        .run();
+      await tx.insert(schema.transactions).values({
+        id: ulid(),
+        workspaceId,
+        accountId: batch.accountId,
+        categoryId: item.categoryId,
+        date: item.date,
+        amount: item.amountCents,
+        kind: item.kind,
+        description: item.rawDescription,
+        externalHash: item.externalHash,
+        importBatchId: batch.id,
+        status: 'confirmed',
+      });
       created++;
 
-      // Aprender se há categoria. Se pattern já existe pra mesma categoria,
-      // weight++. Se mudou de categoria, sobrescreve. Se novo, cria.
       if (item.categoryId) {
-        const existing = tx
+        const [existing] = await tx
           .select()
           .from(schema.categoryLearnings)
           .where(
-            eq(
-              schema.categoryLearnings.descriptionPattern,
-              item.normalizedDescription
+            and(
+              eq(schema.categoryLearnings.workspaceId, workspaceId),
+              eq(
+                schema.categoryLearnings.descriptionPattern,
+                item.normalizedDescription
+              )
             )
           )
-          .get();
+          .limit(1);
 
         const now = new Date().toISOString();
         if (existing) {
-          const newCategoryId = item.categoryId;
-          const wasSameCategory = existing.categoryId === newCategoryId;
-          tx.update(schema.categoryLearnings)
+          const wasSameCategory = existing.categoryId === item.categoryId;
+          await tx
+            .update(schema.categoryLearnings)
             .set({
-              categoryId: newCategoryId,
+              categoryId: item.categoryId,
               weight: wasSameCategory ? existing.weight + 1 : 1,
               lastUsedAt: now,
             })
-            .where(eq(schema.categoryLearnings.id, existing.id))
-            .run();
+            .where(eq(schema.categoryLearnings.id, existing.id));
         } else {
-          tx.insert(schema.categoryLearnings)
-            .values({
-              id: ulid(),
-              descriptionPattern: item.normalizedDescription,
-              categoryId: item.categoryId,
-              weight: 1,
-              lastUsedAt: now,
-            })
-            .run();
+          await tx.insert(schema.categoryLearnings).values({
+            id: ulid(),
+            workspaceId,
+            descriptionPattern: item.normalizedDescription,
+            categoryId: item.categoryId,
+            weight: 1,
+            lastUsedAt: now,
+          });
         }
         learningsUpdated++;
       }
     }
 
-    tx.update(schema.importBatches)
+    await tx
+      .update(schema.importBatches)
       .set({ status: 'confirmed' })
-      .where(eq(schema.importBatches.id, batch.id))
-      .run();
+      .where(eq(schema.importBatches.id, batch.id));
   });
 
   revalidateImports();
   return { ok: true, data: { created, learningsUpdated } };
 }
 
-/**
- * Marca o batch como descartado. Não cria transactions; nada de aprendizado.
- */
 export async function discardImport(
   batchId: string
 ): Promise<ActionResult> {
   if (!batchId) return { ok: false, error: 'ID obrigatório' };
 
-  const result = db
+  const workspaceId = await requireActiveWorkspaceId();
+
+  const result = await db
     .update(schema.importBatches)
     .set({ status: 'discarded' })
     .where(
       and(
+        eq(schema.importBatches.workspaceId, workspaceId),
         eq(schema.importBatches.id, batchId),
         eq(schema.importBatches.status, 'pending_review')
       )
     )
-    .run();
+    .returning({ id: schema.importBatches.id });
 
-  if (result.changes === 0) {
+  if (result.length === 0) {
     return {
       ok: false,
       error: 'Batch não encontrado ou já confirmado/descartado',

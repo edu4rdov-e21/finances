@@ -11,6 +11,7 @@ import {
   type CreateRecurringRuleInput,
   type UpdateRecurringRuleInput,
 } from '@/lib/recurring';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import type { ActionResult } from './types';
 
 function revalidateRecurring() {
@@ -23,20 +24,18 @@ function revalidateRecurring() {
   }
 }
 
-/**
- * Apaga só as transactions PENDING geradas pela regra.
- * Confirmadas ficam — viraram histórico.
- */
-function deletePendingFor(ruleId: string) {
-  return db
+async function deletePendingFor(workspaceId: string, ruleId: string) {
+  const result = await db
     .delete(schema.transactions)
     .where(
       and(
+        eq(schema.transactions.workspaceId, workspaceId),
         eq(schema.transactions.recurringRuleId, ruleId),
         eq(schema.transactions.status, 'pending')
       )
     )
-    .run();
+    .returning({ id: schema.transactions.id });
+  return { count: result.length };
 }
 
 export async function createRecurringRule(
@@ -51,23 +50,23 @@ export async function createRecurringRule(
     };
   }
 
+  const workspaceId = await requireActiveWorkspaceId();
   const id = ulid();
-  db.insert(schema.recurringRules)
-    .values({
-      id,
-      accountId: parsed.data.accountId,
-      categoryId: parsed.data.categoryId,
-      kind: parsed.data.kind,
-      description: parsed.data.description,
-      amount: parsed.data.amount,
-      dayOfMonth: parsed.data.dayOfMonth,
-      startDate: parsed.data.startDate,
-      endDate: parsed.data.endDate ?? null,
-      active: 1,
-    })
-    .run();
+  await db.insert(schema.recurringRules).values({
+    id,
+    workspaceId,
+    accountId: parsed.data.accountId,
+    categoryId: parsed.data.categoryId,
+    kind: parsed.data.kind,
+    description: parsed.data.description,
+    amount: parsed.data.amount,
+    dayOfMonth: parsed.data.dayOfMonth,
+    startDate: parsed.data.startDate,
+    endDate: parsed.data.endDate ?? null,
+    active: 1,
+  });
 
-  const { generated } = generateRecurringTransactions();
+  const { generated } = await generateRecurringTransactions(workspaceId);
 
   revalidateRecurring();
   return { ok: true, data: { id, generated } };
@@ -90,30 +89,35 @@ export async function updateRecurringRule(
     return { ok: false, error: 'Nenhum campo pra atualizar' };
   }
 
-  // Atomicamente: atualiza regra + apaga pending dessa regra.
-  // Re-geração roda fora (idempotente — se falhar, próxima execução cobre).
+  const workspaceId = await requireActiveWorkspaceId();
   let updated = false;
-  db.transaction((tx) => {
-    const result = tx
+  await db.transaction(async (tx) => {
+    const result = await tx
       .update(schema.recurringRules)
       .set(rest)
-      .where(eq(schema.recurringRules.id, id))
-      .run();
-    if (result.changes === 0) return;
-    updated = true;
-    tx.delete(schema.transactions)
       .where(
         and(
+          eq(schema.recurringRules.workspaceId, workspaceId),
+          eq(schema.recurringRules.id, id)
+        )
+      )
+      .returning({ id: schema.recurringRules.id });
+    if (result.length === 0) return;
+    updated = true;
+    await tx
+      .delete(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.workspaceId, workspaceId),
           eq(schema.transactions.recurringRuleId, id),
           eq(schema.transactions.status, 'pending')
         )
-      )
-      .run();
+      );
   });
 
   if (!updated) return { ok: false, error: 'Regra não encontrada' };
 
-  const { generated } = generateRecurringTransactions();
+  const { generated } = await generateRecurringTransactions(workspaceId);
   revalidateRecurring();
   return { ok: true, data: { generated } };
 }
@@ -123,26 +127,33 @@ export async function deleteRecurringRule(
 ): Promise<ActionResult<{ deletedPending: number }>> {
   if (!id) return { ok: false, error: 'ID obrigatório' };
 
+  const workspaceId = await requireActiveWorkspaceId();
   let deletedPending = 0;
   let deletedRule = false;
 
-  db.transaction((tx) => {
-    const txResult = tx
+  await db.transaction(async (tx) => {
+    const txResult = await tx
       .delete(schema.transactions)
       .where(
         and(
+          eq(schema.transactions.workspaceId, workspaceId),
           eq(schema.transactions.recurringRuleId, id),
           eq(schema.transactions.status, 'pending')
         )
       )
-      .run();
-    deletedPending = txResult.changes;
+      .returning({ id: schema.transactions.id });
+    deletedPending = txResult.length;
 
-    const ruleResult = tx
+    const ruleResult = await tx
       .delete(schema.recurringRules)
-      .where(eq(schema.recurringRules.id, id))
-      .run();
-    deletedRule = ruleResult.changes > 0;
+      .where(
+        and(
+          eq(schema.recurringRules.workspaceId, workspaceId),
+          eq(schema.recurringRules.id, id)
+        )
+      )
+      .returning({ id: schema.recurringRules.id });
+    deletedRule = ruleResult.length > 0;
   });
 
   if (!deletedRule) return { ok: false, error: 'Regra não encontrada' };
@@ -157,21 +168,27 @@ export async function toggleRecurringRule(
 ): Promise<ActionResult<{ generated: number; deletedPending: number }>> {
   if (!id) return { ok: false, error: 'ID obrigatório' };
 
-  const result = db
+  const workspaceId = await requireActiveWorkspaceId();
+  const result = await db
     .update(schema.recurringRules)
     .set({ active: active ? 1 : 0 })
-    .where(eq(schema.recurringRules.id, id))
-    .run();
-  if (result.changes === 0) {
+    .where(
+      and(
+        eq(schema.recurringRules.workspaceId, workspaceId),
+        eq(schema.recurringRules.id, id)
+      )
+    )
+    .returning({ id: schema.recurringRules.id });
+  if (result.length === 0) {
     return { ok: false, error: 'Regra não encontrada' };
   }
 
   let generated = 0;
   let deletedPending = 0;
   if (active) {
-    generated = generateRecurringTransactions().generated;
+    generated = (await generateRecurringTransactions(workspaceId)).generated;
   } else {
-    deletedPending = deletePendingFor(id).changes;
+    deletedPending = (await deletePendingFor(workspaceId, id)).count;
   }
 
   revalidateRecurring();

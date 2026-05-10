@@ -13,18 +13,36 @@ import {
   getCardCycle,
   getOpenInvoiceTotal,
   listCardPurchases,
+  type CreditCardRow,
+  type CardPurchaseSummary,
 } from '@/lib/cards';
 import { listCategories } from '@/lib/accounts';
 import { formatBRL, formatDateShort } from '@/lib/format';
 import { ensureRecurringGenerated } from '@/lib/boot';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import { NewCardPurchaseDialog } from '@/components/new-card-purchase-dialog';
 import { DeleteCardPurchaseButton } from '@/components/delete-card-purchase-button';
 
-export default function CartoesPage() {
-  ensureRecurringGenerated();
+export default async function CartoesPage() {
+  const workspaceId = await requireActiveWorkspaceId();
+  await ensureRecurringGenerated(workspaceId);
 
-  const cards = listCreditCards();
-  const expenseCategories = listCategories('expense');
+  const [cards, expenseCategories] = await Promise.all([
+    listCreditCards(workspaceId),
+    listCategories(workspaceId, 'expense'),
+  ]);
+
+  // Pré-calcula info de cada cartão em paralelo
+  const cardSections = await Promise.all(
+    cards.map(async (card) => {
+      const [invoiceTotal, allPurchases] = await Promise.all([
+        getOpenInvoiceTotal(workspaceId, card.id),
+        listCardPurchases(workspaceId, card.id),
+      ]);
+      const purchases = allPurchases.filter((p) => p.remainingAmount > 0);
+      return { card, invoiceTotal, purchases };
+    })
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -47,8 +65,13 @@ export default function CartoesPage() {
         <EmptyState />
       ) : (
         <div className="flex flex-col gap-6">
-          {cards.map((card) => (
-            <CardSection key={card.id} card={card} />
+          {cardSections.map(({ card, invoiceTotal, purchases }) => (
+            <CardSection
+              key={card.id}
+              card={card}
+              invoiceTotal={invoiceTotal}
+              purchases={purchases}
+            />
           ))}
         </div>
       )}
@@ -56,10 +79,16 @@ export default function CartoesPage() {
   );
 }
 
-function CardSection({ card }: { card: ReturnType<typeof listCreditCards>[number] }) {
+function CardSection({
+  card,
+  invoiceTotal,
+  purchases,
+}: {
+  card: CreditCardRow;
+  invoiceTotal: number;
+  purchases: CardPurchaseSummary[];
+}) {
   const cycle = getCardCycle(card);
-  const invoiceTotal = getOpenInvoiceTotal(card.id);
-  const purchases = listCardPurchases(card.id).filter((p) => p.remainingAmount > 0);
 
   return (
     <section className="rounded-md border border-border bg-surface">
@@ -67,9 +96,6 @@ function CardSection({ card }: { card: ReturnType<typeof listCreditCards>[number
         <div className="flex items-center gap-3">
           <CreditCard className="size-5 text-muted-foreground" />
           <span className="font-display text-lg font-medium">{card.name}</span>
-          <span className="rounded bg-muted px-2 py-0.5 text-xs uppercase tracking-wide text-muted-foreground">
-            {card.ownership}
-          </span>
         </div>
       </header>
 
@@ -183,8 +209,8 @@ function EmptyState() {
     <div className="flex flex-col items-center justify-center rounded-md border border-dashed border-border bg-surface py-20 text-center">
       <p className="text-sm text-foreground">Nenhum cartão de crédito.</p>
       <p className="mt-2 max-w-md text-xs text-muted-foreground">
-        Cadastre cartões em /config (ou rode o seed) — eles aparecem aqui com
-        fatura em aberto e compras parceladas.
+        Cadastre cartões em /config — eles aparecem aqui com fatura em aberto
+        e compras parceladas.
       </p>
     </div>
   );

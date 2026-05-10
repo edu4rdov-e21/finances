@@ -10,7 +10,6 @@ const NOW = new Date('2026-05-09');
 const accountChecking = (overrides: Partial<ProjectionAccount> = {}): ProjectionAccount => ({
   id: 'itau-pf',
   initialBalance: 0,
-  ownership: 'PF',
   kind: 'checking',
   ...overrides,
 });
@@ -18,7 +17,6 @@ const accountChecking = (overrides: Partial<ProjectionAccount> = {}): Projection
 const accountCard = (overrides: Partial<ProjectionAccount> = {}): ProjectionAccount => ({
   id: 'amex',
   initialBalance: 0,
-  ownership: 'PF',
   kind: 'credit_card',
   ...overrides,
 });
@@ -155,20 +153,6 @@ describe('computeProjection', () => {
     });
     // Saldo cai R$ 800 (transfer_in pro cartão é ignorado, cartão não é checking)
     expect(result.months[0].balance).toBe(120000);
-  });
-
-  it('filtro por ownership PF ignora contas PJ', () => {
-    const result = computeProjection({
-      accounts: [
-        accountChecking({ id: 'itau', initialBalance: 100000, ownership: 'PF' }),
-        accountChecking({ id: 'infinitepay', initialBalance: 500000, ownership: 'PJ' }),
-      ],
-      transactions: [],
-      monthsAhead: 1,
-      ownership: 'PF',
-      now: NOW,
-    });
-    expect(result.currentBalance).toBe(100000); // não inclui PJ
   });
 
   it('hypothetical injeta tx adicional (caso simulador)', () => {

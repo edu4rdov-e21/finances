@@ -1,25 +1,11 @@
 import { format, startOfMonth, subDays, subMonths } from 'date-fns';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, schema } from '@/db/client';
-import type { Ownership, ProjectionAccount } from './projection';
-
-/**
- * Reserva mínima recomendada (spec §6.3).
- *
- *   reserva = (soma_expenses_confirmed_ultimos_N_meses / N) * pct
- *
- * Decisões de domínio:
- *  - Histórico = expenses CONFIRMED em contas checking. Pending histórico
- *    é ambíguo (saiu? não saiu?) — preferir subestimar reserva (defensivo).
- *  - Janela = N meses anteriores ao corrente. Mês em curso não conta
- *    (incompleto, distorceria média).
- *  - Cartões fora da soma — coerente com a definição de saldo (só checking).
- *  - Transferências fora — são internas, não é despesa real.
- */
+import type { ProjectionAccount } from './projection-compute';
 
 export type ReserveTx = {
   accountId: string;
-  date: string; // YYYY-MM-DD
+  date: string;
   amount: number;
   kind: 'expense' | 'income' | 'transfer_out' | 'transfer_in';
   status: 'confirmed' | 'pending';
@@ -36,28 +22,20 @@ export function computeMinimumReserve(opts: {
   transactions: ReserveTx[];
   pct?: number;
   windowMonths?: number;
-  ownership?: Ownership;
   now?: Date;
 }): number {
   const pct = opts.pct ?? DEFAULT_RESERVE_PCT;
   const windowMonths = opts.windowMonths ?? DEFAULT_RESERVE_WINDOW_MONTHS;
-  const ownership = opts.ownership ?? 'both';
   const now = opts.now ?? new Date();
 
   const eligibleIds = new Set(
     opts.accounts
-      .filter(
-        (a) =>
-          a.kind === 'checking' &&
-          (ownership === 'both' || a.ownership === ownership)
-      )
+      .filter((a) => a.kind === 'checking')
       .map((a) => a.id)
   );
 
   if (eligibleIds.size === 0) return 0;
 
-  // Janela: do início do mês "now - windowMonths" até o último dia do mês
-  // anterior ao corrente.
   const currentMonthStart = startOfMonth(now);
   const windowStart = subMonths(currentMonthStart, windowMonths);
   const windowEnd = subDays(currentMonthStart, 1);
@@ -82,26 +60,29 @@ export function computeMinimumReserve(opts: {
 /**
  * Versão que toca o banco. Server-only.
  */
-export function getMinimumReserve(
+export async function getMinimumReserve(
+  workspaceId: string,
   opts: {
     pct?: number;
     windowMonths?: number;
-    ownership?: Ownership;
     now?: Date;
   } = {}
-): number {
-  const accounts: ProjectionAccount[] = db
+): Promise<number> {
+  const accounts: ProjectionAccount[] = await db
     .select({
       id: schema.accounts.id,
       initialBalance: schema.accounts.initialBalance,
-      ownership: schema.accounts.ownership,
       kind: schema.accounts.kind,
     })
     .from(schema.accounts)
-    .where(eq(schema.accounts.archived, 0))
-    .all();
+    .where(
+      and(
+        eq(schema.accounts.workspaceId, workspaceId),
+        eq(schema.accounts.archived, 0)
+      )
+    );
 
-  const transactions: ReserveTx[] = db
+  const transactions: ReserveTx[] = await db
     .select({
       accountId: schema.transactions.accountId,
       date: schema.transactions.date,
@@ -110,7 +91,7 @@ export function getMinimumReserve(
       status: schema.transactions.status,
     })
     .from(schema.transactions)
-    .all();
+    .where(eq(schema.transactions.workspaceId, workspaceId));
 
   return computeMinimumReserve({ ...opts, accounts, transactions });
 }

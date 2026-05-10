@@ -21,6 +21,7 @@ import { CategoryCell } from '@/components/category-cell';
 import { DeleteTransactionButton } from '@/components/delete-transaction-button';
 import { buttonVariants } from '@/components/ui/button';
 import { ensureRecurringGenerated } from '@/lib/boot';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -29,14 +30,17 @@ export default async function LancamentosPage({
 }: {
   searchParams: SearchParams;
 }) {
-  ensureRecurringGenerated();
+  const workspaceId = await requireActiveWorkspaceId();
+  await ensureRecurringGenerated(workspaceId);
 
   const raw = await searchParams;
   const filters = transactionFiltersSchema.parse(raw);
 
-  const rows = listTransactions(filters);
-  const accounts = listAccounts();
-  const categories = listCategories();
+  const [rows, accounts, categories] = await Promise.all([
+    listTransactions(workspaceId, filters),
+    listAccounts(workspaceId),
+    listCategories(workspaceId),
+  ]);
 
   const hasFiltersApplied = Object.keys(filters).length > 0;
 

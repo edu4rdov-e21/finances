@@ -9,7 +9,6 @@
 export type AccountForPatrimony = {
   id: string;
   initialBalance: number;
-  ownership: 'PF' | 'PJ';
   kind: 'checking' | 'credit_card';
 };
 
@@ -61,28 +60,22 @@ export function computePatrimonyAt(opts: {
   transactions: TxForPatrimony[];
   dateIso: string;
   investments: number;
-  ownership?: 'PF' | 'PJ' | 'both';
 }): {
   checking: number;
   cards: number;
   investments: number;
   total: number;
 } {
-  const ownership = opts.ownership ?? 'both';
-  const filtered = opts.accounts.filter(
-    (a) => ownership === 'both' || a.ownership === ownership
-  );
-
   let checking = 0;
   let cards = 0;
-  for (const a of filtered) {
+  for (const a of opts.accounts) {
     const balance = computeAccountBalanceAt({
       account: a,
       transactions: opts.transactions,
       dateIso: opts.dateIso,
     });
     if (a.kind === 'checking') checking += balance;
-    else cards += balance; // tipicamente negativo (gastos no cartão sem pagamento)
+    else cards += balance;
   }
 
   return {

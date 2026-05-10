@@ -4,30 +4,36 @@ import { db, schema } from '@/db/client';
 export type AccountRow = typeof schema.accounts.$inferSelect;
 export type CategoryRow = typeof schema.categories.$inferSelect;
 
-/** Contas não arquivadas, ordem alfabética. */
-export function listAccounts(): AccountRow[] {
-  return db
+/** Contas não arquivadas do workspace, ordem alfabética. */
+export async function listAccounts(workspaceId: string): Promise<AccountRow[]> {
+  return await db
     .select()
     .from(schema.accounts)
-    .where(eq(schema.accounts.archived, 0))
-    .orderBy(schema.accounts.name)
-    .all();
+    .where(
+      and(
+        eq(schema.accounts.workspaceId, workspaceId),
+        eq(schema.accounts.archived, 0)
+      )
+    )
+    .orderBy(schema.accounts.name);
 }
 
 /**
- * Categorias não arquivadas. Filtra por kind se passado — útil pra modal
- * de novo lançamento mostrar só "expense" quando o tipo é saída.
+ * Categorias não arquivadas do workspace. Filtra por kind se passado — útil
+ * pra modal de novo lançamento mostrar só "expense" quando o tipo é saída.
  */
-export function listCategories(
+export async function listCategories(
+  workspaceId: string,
   kind?: 'expense' | 'income'
-): CategoryRow[] {
-  const where = kind
-    ? and(eq(schema.categories.archived, 0), eq(schema.categories.kind, kind))
-    : eq(schema.categories.archived, 0);
-  return db
+): Promise<CategoryRow[]> {
+  const conditions = [
+    eq(schema.categories.workspaceId, workspaceId),
+    eq(schema.categories.archived, 0),
+  ];
+  if (kind) conditions.push(eq(schema.categories.kind, kind));
+  return await db
     .select()
     .from(schema.categories)
-    .where(where)
-    .orderBy(schema.categories.name)
-    .all();
+    .where(and(...conditions))
+    .orderBy(schema.categories.name);
 }

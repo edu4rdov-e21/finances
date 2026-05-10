@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { and, desc, eq, like } from 'drizzle-orm';
+import { and, desc, eq, like, sql } from 'drizzle-orm';
 import {
   addMonths,
   format,
@@ -50,10 +50,15 @@ export type RecurringRuleRow = RecurringRule & {
   categoryName: string | null;
 };
 
-export function listRecurringRules(): RecurringRuleRow[] {
-  return db
+export type RecurringRuleRowFull = RecurringRuleRow & { workspaceId: string };
+
+export async function listRecurringRules(
+  workspaceId: string
+): Promise<RecurringRuleRow[]> {
+  return await db
     .select({
       id: schema.recurringRules.id,
+      workspaceId: schema.recurringRules.workspaceId,
       accountId: schema.recurringRules.accountId,
       categoryId: schema.recurringRules.categoryId,
       kind: schema.recurringRules.kind,
@@ -75,12 +80,12 @@ export function listRecurringRules(): RecurringRuleRow[] {
       schema.categories,
       eq(schema.recurringRules.categoryId, schema.categories.id)
     )
+    .where(eq(schema.recurringRules.workspaceId, workspaceId))
     .orderBy(
       desc(schema.recurringRules.active),
       schema.recurringRules.dayOfMonth,
       schema.recurringRules.description
-    )
-    .all();
+    );
 }
 
 /**
@@ -141,14 +146,19 @@ export function nextOccurrences(
  *
  * Devolve quantas transactions foram criadas (zero em rodadas idempotentes).
  */
-export function generateRecurringTransactions(
+export async function generateRecurringTransactions(
+  workspaceId: string,
   monthsAhead = 12
-): { generated: number } {
-  const activeRules = db
+): Promise<{ generated: number }> {
+  const activeRules = await db
     .select()
     .from(schema.recurringRules)
-    .where(eq(schema.recurringRules.active, 1))
-    .all();
+    .where(
+      and(
+        eq(schema.recurringRules.workspaceId, workspaceId),
+        eq(schema.recurringRules.active, 1)
+      )
+    );
 
   let generated = 0;
 
@@ -157,7 +167,7 @@ export function generateRecurringTransactions(
 
     for (const date of dates) {
       const yearMonth = date.slice(0, 7); // "2026-05"
-      const existing = db
+      const [existing] = await db
         .select({ id: schema.transactions.id })
         .from(schema.transactions)
         .where(
@@ -166,23 +176,22 @@ export function generateRecurringTransactions(
             like(schema.transactions.date, `${yearMonth}%`)
           )
         )
-        .get();
+        .limit(1);
 
       if (existing) continue;
 
-      db.insert(schema.transactions)
-        .values({
-          id: ulid(),
-          accountId: rule.accountId,
-          categoryId: rule.categoryId,
-          date,
-          amount: rule.amount,
-          kind: rule.kind,
-          description: rule.description,
-          recurringRuleId: rule.id,
-          status: 'pending',
-        })
-        .run();
+      await db.insert(schema.transactions).values({
+        id: ulid(),
+        workspaceId,
+        accountId: rule.accountId,
+        categoryId: rule.categoryId,
+        date,
+        amount: rule.amount,
+        kind: rule.kind,
+        description: rule.description,
+        recurringRuleId: rule.id,
+        status: 'pending',
+      });
       generated++;
     }
   }

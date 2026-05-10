@@ -4,25 +4,21 @@ import { revalidatePath } from 'next/cache';
 import { ulid } from 'ulid';
 import { addMonths, format, parseISO } from 'date-fns';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, schema } from '@/db/client';
 import { distributeInstallments } from '@/lib/cards';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import type { ActionResult } from './types';
 
 const ISO_DATE = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Data deve ser YYYY-MM-DD');
 
-// Schema interno — Next.js 'use server' files só permitem export de async funcs.
-// Tipos (export type abaixo) somem em runtime, então passam.
 const createCardPurchaseSchema = z.object({
   accountId: z.string().min(1, 'Cartão obrigatório'),
   categoryId: z.string().min(1, 'Categoria obrigatória'),
   description: z.string().trim().min(1, 'Descrição obrigatória').max(200),
-  totalAmountCents: z
-    .number()
-    .int()
-    .positive('Total deve ser positivo'),
+  totalAmountCents: z.number().int().positive('Total deve ser positivo'),
   installments: z
     .number()
     .int()
@@ -46,7 +42,6 @@ function revalidateCards() {
 export async function createCardPurchase(
   input: CreateCardPurchaseInput
 ): Promise<ActionResult<{ id: string; transactionsCreated: number }>> {
-  // Camada 1: forma
   const parsed = createCardPurchaseSchema.safeParse(input);
   if (!parsed.success) {
     return {
@@ -56,12 +51,19 @@ export async function createCardPurchase(
     };
   }
 
-  // Camada 2: domínio (estado do banco)
-  const account = db
+  const workspaceId = await requireActiveWorkspaceId();
+
+  // Validação de domínio escopada ao workspace
+  const [account] = await db
     .select()
     .from(schema.accounts)
-    .where(eq(schema.accounts.id, parsed.data.accountId))
-    .get();
+    .where(
+      and(
+        eq(schema.accounts.workspaceId, workspaceId),
+        eq(schema.accounts.id, parsed.data.accountId)
+      )
+    )
+    .limit(1);
   if (!account || account.kind !== 'credit_card') {
     return {
       ok: false,
@@ -70,11 +72,16 @@ export async function createCardPurchase(
     };
   }
 
-  const category = db
+  const [category] = await db
     .select()
     .from(schema.categories)
-    .where(eq(schema.categories.id, parsed.data.categoryId))
-    .get();
+    .where(
+      and(
+        eq(schema.categories.workspaceId, workspaceId),
+        eq(schema.categories.id, parsed.data.categoryId)
+      )
+    )
+    .limit(1);
   if (!category || category.kind !== 'expense') {
     return {
       ok: false,
@@ -89,40 +96,37 @@ export async function createCardPurchase(
   );
 
   const purchaseId = ulid();
-  // parseISO em vez de new Date pra evitar shift de fuso UTC→local
   const baseDate = parseISO(parsed.data.firstInstallmentDate);
   const isMulti = parsed.data.installments > 1;
 
-  db.transaction((tx) => {
-    tx.insert(schema.cardPurchases)
-      .values({
-        id: purchaseId,
-        accountId: parsed.data.accountId,
-        categoryId: parsed.data.categoryId,
-        description: parsed.data.description,
-        totalAmount: parsed.data.totalAmountCents,
-        installments: parsed.data.installments,
-        firstInstallmentDate: parsed.data.firstInstallmentDate,
-      })
-      .run();
+  await db.transaction(async (tx) => {
+    await tx.insert(schema.cardPurchases).values({
+      id: purchaseId,
+      workspaceId,
+      accountId: parsed.data.accountId,
+      categoryId: parsed.data.categoryId,
+      description: parsed.data.description,
+      totalAmount: parsed.data.totalAmountCents,
+      installments: parsed.data.installments,
+      firstInstallmentDate: parsed.data.firstInstallmentDate,
+    });
 
     for (let i = 0; i < amounts.length; i++) {
       const date = format(addMonths(baseDate, i), 'yyyy-MM-dd');
-      tx.insert(schema.transactions)
-        .values({
-          id: ulid(),
-          accountId: parsed.data.accountId,
-          categoryId: parsed.data.categoryId,
-          date,
-          amount: amounts[i],
-          kind: 'expense',
-          description: isMulti
-            ? `${parsed.data.description} (${i + 1}/${parsed.data.installments})`
-            : parsed.data.description,
-          cardPurchaseId: purchaseId,
-          status: 'pending',
-        })
-        .run();
+      await tx.insert(schema.transactions).values({
+        id: ulid(),
+        workspaceId,
+        accountId: parsed.data.accountId,
+        categoryId: parsed.data.categoryId,
+        date,
+        amount: amounts[i],
+        kind: 'expense',
+        description: isMulti
+          ? `${parsed.data.description} (${i + 1}/${parsed.data.installments})`
+          : parsed.data.description,
+        cardPurchaseId: purchaseId,
+        status: 'pending',
+      });
     }
   });
 
@@ -133,21 +137,22 @@ export async function createCardPurchase(
   };
 }
 
-/**
- * Apaga a compra e suas parcelas — mas APENAS se nenhuma parcela já foi
- * confirmada. Confirmadas viraram histórico; pra removê-las o usuário usa
- * o delete individual em /lancamentos.
- */
 export async function deleteCardPurchase(
   id: string
 ): Promise<ActionResult<{ deletedTransactions: number }>> {
   if (!id) return { ok: false, error: 'ID obrigatório' };
 
-  const txs = db
+  const workspaceId = await requireActiveWorkspaceId();
+
+  const txs = await db
     .select({ status: schema.transactions.status })
     .from(schema.transactions)
-    .where(eq(schema.transactions.cardPurchaseId, id))
-    .all();
+    .where(
+      and(
+        eq(schema.transactions.workspaceId, workspaceId),
+        eq(schema.transactions.cardPurchaseId, id)
+      )
+    );
 
   if (txs.some((t) => t.status === 'confirmed')) {
     return {
@@ -160,18 +165,28 @@ export async function deleteCardPurchase(
   let deletedTransactions = 0;
   let deletedPurchase = false;
 
-  db.transaction((tx) => {
-    const txResult = tx
+  await db.transaction(async (tx) => {
+    const txResult = await tx
       .delete(schema.transactions)
-      .where(eq(schema.transactions.cardPurchaseId, id))
-      .run();
-    deletedTransactions = txResult.changes;
+      .where(
+        and(
+          eq(schema.transactions.workspaceId, workspaceId),
+          eq(schema.transactions.cardPurchaseId, id)
+        )
+      )
+      .returning({ id: schema.transactions.id });
+    deletedTransactions = txResult.length;
 
-    const purchaseResult = tx
+    const purchaseResult = await tx
       .delete(schema.cardPurchases)
-      .where(eq(schema.cardPurchases.id, id))
-      .run();
-    deletedPurchase = purchaseResult.changes > 0;
+      .where(
+        and(
+          eq(schema.cardPurchases.workspaceId, workspaceId),
+          eq(schema.cardPurchases.id, id)
+        )
+      )
+      .returning({ id: schema.cardPurchases.id });
+    deletedPurchase = purchaseResult.length > 0;
   });
 
   if (!deletedPurchase) return { ok: false, error: 'Compra não encontrada' };

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { and, asc, desc, eq, gte, lte, like, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, lte, ilike, type SQL } from 'drizzle-orm';
 import { format } from 'date-fns';
 import { db, schema } from '@/db/client';
 
@@ -94,12 +94,14 @@ export type TransactionRow = {
   categoryName: string | null;
 };
 
-export function listTransactions(
+export async function listTransactions(
+  workspaceId: string,
   filters: TransactionFilters = {}
-): TransactionRow[] {
-  // Constrói condições WHERE só pros filtros presentes. Filtros undefined
-  // não entram no SQL — listagem sem filtro vira SELECT sem WHERE.
-  const conds: SQL[] = [];
+): Promise<TransactionRow[]> {
+  // Sempre escopa por workspaceId. Outros filtros são opcionais.
+  const conds: SQL[] = [
+    eq(schema.transactions.workspaceId, workspaceId),
+  ];
   if (filters.account)
     conds.push(eq(schema.transactions.accountId, filters.account));
   if (filters.category)
@@ -108,11 +110,10 @@ export function listTransactions(
   if (filters.from) conds.push(gte(schema.transactions.date, filters.from));
   if (filters.to) conds.push(lte(schema.transactions.date, filters.to));
   if (filters.search)
-    conds.push(like(schema.transactions.description, `%${filters.search}%`));
+    // ILIKE = case-insensitive em Postgres
+    conds.push(ilike(schema.transactions.description, `%${filters.search}%`));
 
-  const where = conds.length > 0 ? and(...conds) : undefined;
-
-  return db
+  return await db
     .select({
       id: schema.transactions.id,
       date: schema.transactions.date,
@@ -135,18 +136,23 @@ export function listTransactions(
       schema.categories,
       eq(schema.transactions.categoryId, schema.categories.id)
     )
-    .where(where)
-    .orderBy(desc(schema.transactions.date), desc(schema.transactions.createdAt))
-    .all();
+    .where(and(...conds))
+    .orderBy(
+      desc(schema.transactions.date),
+      desc(schema.transactions.createdAt)
+    );
 }
 
 /**
  * Próximas N transactions a partir de hoje (date >= today, ordem asc).
  * Pra lista lateral do Dashboard ("o que vem aí").
  */
-export function listUpcomingTransactions(limit = 10): TransactionRow[] {
+export async function listUpcomingTransactions(
+  workspaceId: string,
+  limit = 10
+): Promise<TransactionRow[]> {
   const todayIso = format(new Date(), 'yyyy-MM-dd');
-  return db
+  return await db
     .select({
       id: schema.transactions.id,
       date: schema.transactions.date,
@@ -169,34 +175,48 @@ export function listUpcomingTransactions(limit = 10): TransactionRow[] {
       schema.categories,
       eq(schema.transactions.categoryId, schema.categories.id)
     )
-    .where(gte(schema.transactions.date, todayIso))
+    .where(
+      and(
+        eq(schema.transactions.workspaceId, workspaceId),
+        gte(schema.transactions.date, todayIso)
+      )
+    )
     .orderBy(asc(schema.transactions.date))
-    .limit(limit)
-    .all();
+    .limit(limit);
 }
 
-export function getTransactionById(id: string) {
-  return db
+export async function getTransactionById(workspaceId: string, id: string) {
+  const [row] = await db
     .select()
     .from(schema.transactions)
-    .where(eq(schema.transactions.id, id))
-    .get();
+    .where(
+      and(
+        eq(schema.transactions.workspaceId, workspaceId),
+        eq(schema.transactions.id, id)
+      )
+    )
+    .limit(1);
+  return row;
 }
 
 /**
- * A spec pré-cadastra "Transferência" como categoria em expense E income
- * (kinds duplicados, com mesmo nome). Helper pra recuperar o id certo pro
- * lado da transferência (out usa expense, in usa income).
+ * A categoria "Transferência" é seed por workspace (em ambos kinds).
+ * Helper pra recuperar o id certo pro lado da transferência.
  */
-export function getTransferCategory(kind: 'expense' | 'income') {
-  return db
+export async function getTransferCategory(
+  workspaceId: string,
+  kind: 'expense' | 'income'
+) {
+  const [row] = await db
     .select()
     .from(schema.categories)
     .where(
       and(
+        eq(schema.categories.workspaceId, workspaceId),
         eq(schema.categories.name, 'Transferência'),
         eq(schema.categories.kind, kind)
       )
     )
-    .get();
+    .limit(1);
+  return row;
 }

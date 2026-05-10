@@ -21,12 +21,9 @@ import { ptBR } from 'date-fns/locale';
  *  - Hypothetical (pra simulador): só afeta se accountId é checking.
  */
 
-export type Ownership = 'PF' | 'PJ' | 'both';
-
 export type ProjectionAccount = {
   id: string;
   initialBalance: number;
-  ownership: 'PF' | 'PJ';
   kind: 'checking' | 'credit_card';
 };
 
@@ -63,20 +60,14 @@ export function computeProjection(opts: {
   accounts: ProjectionAccount[];
   transactions: ProjectionTx[];
   monthsAhead?: number;
-  ownership?: Ownership;
   hypothetical?: HypotheticalTx[];
   now?: Date;
 }): ProjectionResult {
   const monthsAhead = opts.monthsAhead ?? 12;
-  const ownership = opts.ownership ?? 'both';
   const now = opts.now ?? new Date();
   const hypothetical = opts.hypothetical ?? [];
 
-  const eligible = opts.accounts.filter(
-    (a) =>
-      a.kind === 'checking' &&
-      (ownership === 'both' || a.ownership === ownership)
-  );
+  const eligible = opts.accounts.filter((a) => a.kind === 'checking');
   const eligibleIds = new Set(eligible.map((a) => a.id));
 
   if (eligibleIds.size === 0) {

@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { addMonths, endOfMonth, format, startOfMonth } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { db, schema } from '@/db/client';
@@ -11,7 +11,7 @@ import {
 export type PatrimonyMonth = {
   monthIso: string;
   monthLabel: string;
-  endDate: string; // último dia do mês
+  endDate: string;
   checking: number;
   cards: number;
   investments: number;
@@ -25,32 +25,25 @@ export type SnapshotRow = {
   notes: string | null;
 };
 
-export type PatrimonySnapshot = {
-  date: string;
-  investments: number;
-  notes: string | null;
-};
-
-/**
- * Carrega contas e transactions confirmed do banco e devolve em formato
- * compatível com computePatrimonyAt.
- */
-function loadAccountsAndTxs(): {
+async function loadAccountsAndTxs(workspaceId: string): Promise<{
   accounts: AccountForPatrimony[];
   transactions: TxForPatrimony[];
-} {
-  const accounts: AccountForPatrimony[] = db
+}> {
+  const accounts: AccountForPatrimony[] = await db
     .select({
       id: schema.accounts.id,
       initialBalance: schema.accounts.initialBalance,
-      ownership: schema.accounts.ownership,
       kind: schema.accounts.kind,
     })
     .from(schema.accounts)
-    .where(eq(schema.accounts.archived, 0))
-    .all();
+    .where(
+      and(
+        eq(schema.accounts.workspaceId, workspaceId),
+        eq(schema.accounts.archived, 0)
+      )
+    );
 
-  const transactions: TxForPatrimony[] = db
+  const transactions: TxForPatrimony[] = await db
     .select({
       accountId: schema.transactions.accountId,
       date: schema.transactions.date,
@@ -59,16 +52,16 @@ function loadAccountsAndTxs(): {
       status: schema.transactions.status,
     })
     .from(schema.transactions)
-    .all();
+    .where(eq(schema.transactions.workspaceId, workspaceId));
 
   return { accounts, transactions };
 }
 
-/**
- * Patrimônio HOJE (em "agora").
- */
-export function getCurrentPatrimony(opts: { investments: number }) {
-  const { accounts, transactions } = loadAccountsAndTxs();
+export async function getCurrentPatrimony(
+  workspaceId: string,
+  opts: { investments: number }
+) {
+  const { accounts, transactions } = await loadAccountsAndTxs(workspaceId);
   const today = format(new Date(), 'yyyy-MM-dd');
   return computePatrimonyAt({
     accounts,
@@ -78,19 +71,21 @@ export function getCurrentPatrimony(opts: { investments: number }) {
   });
 }
 
-/**
- * Snapshot do mês corrente (se existe). Snapshots são chaveados por
- * primeiro dia do mês.
- */
-export function getCurrentMonthSnapshot(
+export async function getCurrentMonthSnapshot(
+  workspaceId: string,
   now: Date = new Date()
-): SnapshotRow | null {
+): Promise<SnapshotRow | null> {
   const monthFirstDay = format(startOfMonth(now), 'yyyy-MM-dd');
-  const result = db
+  const [result] = await db
     .select()
     .from(schema.assetsSnapshots)
-    .where(eq(schema.assetsSnapshots.date, monthFirstDay))
-    .get();
+    .where(
+      and(
+        eq(schema.assetsSnapshots.workspaceId, workspaceId),
+        eq(schema.assetsSnapshots.date, monthFirstDay)
+      )
+    )
+    .limit(1);
   return result
     ? {
         id: result.id,
@@ -101,12 +96,14 @@ export function getCurrentMonthSnapshot(
     : null;
 }
 
-/** Lista todos os snapshots, ordem desc por data. */
-export function listSnapshots(): SnapshotRow[] {
-  return db
+export async function listSnapshots(
+  workspaceId: string
+): Promise<SnapshotRow[]> {
+  const rows = await db
     .select()
     .from(schema.assetsSnapshots)
-    .all()
+    .where(eq(schema.assetsSnapshots.workspaceId, workspaceId));
+  return rows
     .map((r) => ({
       id: r.id,
       date: r.date,
@@ -116,27 +113,21 @@ export function listSnapshots(): SnapshotRow[] {
     .sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
-/**
- * Série mensal de patrimônio dos últimos N meses (default 12).
- * Para cada mês: snapshot do investments daquele mês (se existir, senão 0)
- * + saldos confirmed das contas no último dia do mês.
- */
-export function computeMonthlyPatrimony(
+export async function computeMonthlyPatrimony(
+  workspaceId: string,
   monthsBack = 12,
   now: Date = new Date()
-): PatrimonyMonth[] {
-  const { accounts, transactions } = loadAccountsAndTxs();
-  const snapshots = listSnapshots();
+): Promise<PatrimonyMonth[]> {
+  const { accounts, transactions } = await loadAccountsAndTxs(workspaceId);
+  const snapshots = await listSnapshots(workspaceId);
   const snapByMonth = new Map(snapshots.map((s) => [s.date, s.investments]));
 
   const out: PatrimonyMonth[] = [];
 
-  // Itera do mês mais antigo pro mais novo (esquerda → direita no gráfico)
   for (let i = monthsBack - 1; i >= 0; i--) {
     const targetMonth = addMonths(now, -i);
     const monthStart = startOfMonth(targetMonth);
     const monthFirstDay = format(monthStart, 'yyyy-MM-dd');
-    // Pra mês corrente, usar HOJE como dateIso; senão último dia do mês
     const isCurrentMonth = i === 0;
     const dateIso = isCurrentMonth
       ? format(now, 'yyyy-MM-dd')

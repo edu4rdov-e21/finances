@@ -3,29 +3,23 @@
 import { revalidatePath } from 'next/cache';
 import { ulid } from 'ulid';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { format, startOfMonth } from 'date-fns';
 import { db, schema } from '@/db/client';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import type { ActionResult } from './types';
 
-// Schema interno (regra do 'use server': só funções async exportadas).
 const saveSnapshotSchema = z.object({
-  /** primeiro dia do mês de referência. default = mês corrente */
   monthDate: z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional(),
-  /** valor em centavos das aplicações manuais (>= 0) */
   investments: z.number().int().nonnegative('Valor não pode ser negativo'),
   notes: z.string().trim().max(500).nullable().optional(),
 });
 
 export type SaveSnapshotInput = z.infer<typeof saveSnapshotSchema>;
 
-/**
- * Cria ou atualiza o snapshot do mês. Chave = primeiro dia do mês.
- * Se já existe snapshot pro mês, sobrescreve (upsert manual).
- */
 export async function saveSnapshot(
   input: SaveSnapshotInput
 ): Promise<ActionResult<{ id: string }>> {
@@ -38,38 +32,42 @@ export async function saveSnapshot(
     };
   }
 
+  const workspaceId = await requireActiveWorkspaceId();
   const monthDate =
     parsed.data.monthDate ??
     format(startOfMonth(new Date()), 'yyyy-MM-dd');
 
-  // Upsert: tenta achar snapshot existente pra esse mês
-  const existing = db
+  const [existing] = await db
     .select()
     .from(schema.assetsSnapshots)
-    .where(eq(schema.assetsSnapshots.date, monthDate))
-    .get();
+    .where(
+      and(
+        eq(schema.assetsSnapshots.workspaceId, workspaceId),
+        eq(schema.assetsSnapshots.date, monthDate)
+      )
+    )
+    .limit(1);
 
   let id: string;
   if (existing) {
     id = existing.id;
-    db.update(schema.assetsSnapshots)
+    await db
+      .update(schema.assetsSnapshots)
       .set({
         investments: parsed.data.investments,
         notes: parsed.data.notes ?? null,
       })
-      .where(eq(schema.assetsSnapshots.id, id))
-      .run();
+      .where(eq(schema.assetsSnapshots.id, id));
   } else {
     id = ulid();
-    db.insert(schema.assetsSnapshots)
-      .values({
-        id,
-        date: monthDate,
-        accountId: null,
-        investments: parsed.data.investments,
-        notes: parsed.data.notes ?? null,
-      })
-      .run();
+    await db.insert(schema.assetsSnapshots).values({
+      id,
+      workspaceId,
+      date: monthDate,
+      accountId: null,
+      investments: parsed.data.investments,
+      notes: parsed.data.notes ?? null,
+    });
   }
 
   try {
@@ -82,18 +80,21 @@ export async function saveSnapshot(
   return { ok: true, data: { id } };
 }
 
-/**
- * Apaga snapshot de um mês específico (caso o usuário queira refazer).
- */
 export async function deleteSnapshot(id: string): Promise<ActionResult> {
   if (!id) return { ok: false, error: 'ID obrigatório' };
 
-  const result = db
+  const workspaceId = await requireActiveWorkspaceId();
+  const result = await db
     .delete(schema.assetsSnapshots)
-    .where(eq(schema.assetsSnapshots.id, id))
-    .run();
+    .where(
+      and(
+        eq(schema.assetsSnapshots.workspaceId, workspaceId),
+        eq(schema.assetsSnapshots.id, id)
+      )
+    )
+    .returning({ id: schema.assetsSnapshots.id });
 
-  if (result.changes === 0) {
+  if (result.length === 0) {
     return { ok: false, error: 'Snapshot não encontrado' };
   }
 

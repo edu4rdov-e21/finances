@@ -12,20 +12,20 @@ import { ensureRecurringGenerated } from '@/lib/boot';
 import { getProjectedBalance } from '@/lib/projection';
 import { getMinimumReserve } from '@/lib/reserve';
 import { listUpcomingTransactions } from '@/lib/transactions';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import { db, schema } from '@/db/client';
 import { cn } from '@/lib/utils';
 import { ProjectionChart } from '@/components/projection-chart';
 
-export default function DashboardPage() {
-  ensureRecurringGenerated();
+export default async function DashboardPage() {
+  const workspaceId = await requireActiveWorkspaceId();
+  await ensureRecurringGenerated(workspaceId);
 
-  const projection = getProjectedBalance({ monthsAhead: 12 });
-  const reserve = getMinimumReserve();
-  const upcoming = listUpcomingTransactions(10);
+  const projection = await getProjectedBalance(workspaceId, { monthsAhead: 12 });
+  const reserve = await getMinimumReserve(workspaceId);
+  const upcoming = await listUpcomingTransactions(workspaceId, 10);
 
-  // Fatura aberta total = soma das transactions pending de despesa em cartões.
-  // (Spec §5.2 "soma das parcelas futuras de todos os cartões")
-  const cardPendingRows = db
+  const cardPendingRows = await db
     .select({ amount: schema.transactions.amount })
     .from(schema.transactions)
     .innerJoin(
@@ -34,15 +34,14 @@ export default function DashboardPage() {
     )
     .where(
       and(
+        eq(schema.transactions.workspaceId, workspaceId),
         eq(schema.accounts.kind, 'credit_card'),
         eq(schema.transactions.kind, 'expense'),
         eq(schema.transactions.status, 'pending')
       )
-    )
-    .all();
+    );
   const faturaAberta = cardPendingRows.reduce((s, r) => s + r.amount, 0);
 
-  // Alertas
   const negativeMonths = projection.months.filter((m) => m.balance < 0);
   const belowReserveMonths = projection.months.filter(
     (m) => m.balance >= 0 && m.balance < reserve
@@ -171,7 +170,7 @@ function Alerts({
 function UpcomingList({
   rows,
 }: {
-  rows: ReturnType<typeof listUpcomingTransactions>;
+  rows: Awaited<ReturnType<typeof listUpcomingTransactions>>;
 }) {
   return (
     <div className="rounded-md border border-border bg-surface">

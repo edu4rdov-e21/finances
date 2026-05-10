@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { db, schema } from '@/db/client';
 import type { ParsedRawTx } from './parsers/types';
 
@@ -104,16 +104,18 @@ export function detectInstallment(
  * Ordena por weight desc primeiro: matches mais "votados" ganham.
  * Levenshtein fuzzy fica pra evolução, se for preciso.
  */
-export function categorizeFromLearnings(
+export async function categorizeFromLearnings(
+  workspaceId: string,
   normalized: string
-): { categoryId: string; weight: number } | null {
-  const learnings = db
+): Promise<{ categoryId: string; weight: number } | null> {
+  const learnings = await db
     .select()
     .from(schema.categoryLearnings)
-    .all()
-    .sort((a, b) => b.weight - a.weight);
+    .where(eq(schema.categoryLearnings.workspaceId, workspaceId));
 
-  for (const l of learnings) {
+  const sorted = [...learnings].sort((a, b) => b.weight - a.weight);
+
+  for (const l of sorted) {
     if (l.descriptionPattern && normalized.includes(l.descriptionPattern)) {
       return { categoryId: l.categoryId, weight: l.weight };
     }
@@ -123,50 +125,57 @@ export function categorizeFromLearnings(
 
 /**
  * Pipeline completo. Para cada ParsedRawTx, monta ImportPreviewItem com
- * hash, dedup contra transactions existentes da conta, parcela detectada,
+ * hash, dedup contra transactions existentes do workspace, parcela detectada,
  * categoria sugerida via learnings.
  */
-export function buildImportPreview(opts: {
+export async function buildImportPreview(opts: {
+  workspaceId: string;
   parsed: ParsedRawTx[];
   accountId: string;
-}): ImportPreviewItem[] {
-  // 1. Calcular hashes pra todos
-  const items = opts.parsed
-    .filter((p) => p.amountCents !== 0)
-    .map((p) => {
-      const normalized = normalizeDescription(p.description);
-      const hash = computeExternalHash({
-        accountId: opts.accountId,
-        date: p.date,
-        amountCents: p.amountCents,
-        description: p.description,
-      });
-      const installmentInfo = detectInstallment(p.description);
-      const suggestion = categorizeFromLearnings(normalized);
-      return {
-        date: p.date,
-        rawDescription: p.description,
-        normalizedDescription: normalized,
-        amountCents: Math.abs(p.amountCents),
-        kind: (p.amountCents >= 0 ? 'income' : 'expense') as 'income' | 'expense',
-        externalHash: hash,
-        installmentInfo,
-        suggestedCategoryId: suggestion?.categoryId ?? null,
-        duplicateOfId: null as string | null,
-      };
+}): Promise<ImportPreviewItem[]> {
+  const items: ImportPreviewItem[] = [];
+  for (const p of opts.parsed) {
+    if (p.amountCents === 0) continue;
+    const normalized = normalizeDescription(p.description);
+    const hash = computeExternalHash({
+      accountId: opts.accountId,
+      date: p.date,
+      amountCents: p.amountCents,
+      description: p.description,
     });
+    const installmentInfo = detectInstallment(p.description);
+    const suggestion = await categorizeFromLearnings(
+      opts.workspaceId,
+      normalized
+    );
+    items.push({
+      date: p.date,
+      rawDescription: p.description,
+      normalizedDescription: normalized,
+      amountCents: Math.abs(p.amountCents),
+      kind: p.amountCents >= 0 ? 'income' : 'expense',
+      externalHash: hash,
+      installmentInfo,
+      suggestedCategoryId: suggestion?.categoryId ?? null,
+      duplicateOfId: null,
+    });
+  }
 
-  // 2. Lookup duplicatas em batch — uma query, todos os hashes
+  // Lookup duplicatas em batch — uma query, escopada ao workspace
   if (items.length > 0) {
     const hashes = items.map((i) => i.externalHash);
-    const existing = db
+    const existing = await db
       .select({
         id: schema.transactions.id,
         externalHash: schema.transactions.externalHash,
       })
       .from(schema.transactions)
-      .where(inArray(schema.transactions.externalHash, hashes))
-      .all();
+      .where(
+        and(
+          eq(schema.transactions.workspaceId, opts.workspaceId),
+          inArray(schema.transactions.externalHash, hashes)
+        )
+      );
 
     const hashToId = new Map<string, string>();
     for (const e of existing) {

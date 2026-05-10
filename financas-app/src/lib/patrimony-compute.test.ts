@@ -11,7 +11,6 @@ const account = (
 ): AccountForPatrimony => ({
   id: 'itau',
   initialBalance: 0,
-  ownership: 'PF',
   kind: 'checking',
   ...over,
 });
@@ -103,22 +102,6 @@ describe('computePatrimonyAt', () => {
     expect(r.cards).toBe(-50000); // -R$ 500 (gastos pendentes de pagamento)
     expect(r.investments).toBe(1000000);
     expect(r.total).toBe(1150000); // 2k - 500 + 10k = 11.5k
-  });
-
-  it('filtra ownership PF', () => {
-    const r = computePatrimonyAt({
-      accounts: [
-        account({ id: 'itau', initialBalance: 200000, ownership: 'PF' }),
-        account({ id: 'pj', initialBalance: 500000, ownership: 'PJ' }),
-      ],
-      transactions: [],
-      dateIso: '2026-05-09',
-      investments: 0,
-      ownership: 'PF',
-    });
-    // só itau (PF)
-    expect(r.checking).toBe(200000);
-    expect(r.total).toBe(200000);
   });
 
   it('sem contas → total = só investments', () => {

@@ -1,29 +1,25 @@
 import { generateRecurringTransactions } from './recurring';
 
-const THROTTLE_MS = 60_000; // 1 minuto
+const THROTTLE_MS = 60_000;
 
-let lastRunMs = 0;
+// Throttle por workspace pra não rodar à toa em cada page-load
+const lastRunByWorkspace = new Map<string, number>();
 
 /**
- * Garante que recorrências estejam materializadas pros próximos 12 meses.
- *
- * - Idempotente: o job interno verifica antes de inserir (segurança).
- * - Throttled: executa no máximo 1× por minuto (eficiência).
- *
- * Pode ser chamado livremente no início de qualquer Server Component sem
- * se preocupar com performance. A primeira visita dispara; as N seguintes
- * dentro da janela viram no-op.
+ * Garante que recorrências do workspace estejam materializadas pros
+ * próximos 12 meses. Idempotente + throttled por workspace.
  */
-export function ensureRecurringGenerated(): void {
+export async function ensureRecurringGenerated(
+  workspaceId: string
+): Promise<void> {
   const now = Date.now();
-  if (now - lastRunMs < THROTTLE_MS) return;
-  lastRunMs = now;
+  const lastRun = lastRunByWorkspace.get(workspaceId) ?? 0;
+  if (now - lastRun < THROTTLE_MS) return;
+  lastRunByWorkspace.set(workspaceId, now);
 
   try {
-    generateRecurringTransactions();
+    await generateRecurringTransactions(workspaceId);
   } catch (err) {
-    // Falha silenciosa — geração não é crítica pra render da página atual.
-    // Próxima visita após THROTTLE_MS tenta de novo.
     console.error('[ensureRecurringGenerated] failed:', err);
   }
 }

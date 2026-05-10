@@ -7,7 +7,6 @@ const NOW = new Date('2026-05-09'); // janela default = fev/mar/abr 2026
 const checking = (over: Partial<ProjectionAccount> = {}): ProjectionAccount => ({
   id: 'itau',
   initialBalance: 0,
-  ownership: 'PF',
   kind: 'checking',
   ...over,
 });
@@ -15,7 +14,6 @@ const checking = (over: Partial<ProjectionAccount> = {}): ProjectionAccount => (
 const card = (over: Partial<ProjectionAccount> = {}): ProjectionAccount => ({
   id: 'amex',
   initialBalance: 0,
-  ownership: 'PF',
   kind: 'credit_card',
   ...over,
 });
@@ -124,23 +122,6 @@ describe('computeMinimumReserve', () => {
     });
     // Só 90.000 (kind=expense). Média 30.000. × 0.3 = 9.000
     expect(result).toBe(9000);
-  });
-
-  it('ownership PF ignora expenses em conta PJ', () => {
-    const result = computeMinimumReserve({
-      accounts: [
-        checking({ id: 'itau', ownership: 'PF' }),
-        checking({ id: 'cora-pj', ownership: 'PJ' }),
-      ],
-      transactions: [
-        expenseTx({ accountId: 'cora-pj', date: '2026-04-10', amount: 999999 }),
-        expenseTx({ accountId: 'itau', date: '2026-04-10', amount: 60000 }),
-      ],
-      ownership: 'PF',
-      now: NOW,
-    });
-    // Só itau. Média 20.000. × 0.3 = 6.000
-    expect(result).toBe(6000);
   });
 
   it('pct customizado (50%)', () => {

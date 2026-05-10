@@ -1,35 +1,36 @@
-import { drizzle } from 'drizzle-orm/better-sqlite3';
-import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import * as schema from './schema';
 
 /**
- * Conexão SQLite compartilhada pelo app.
+ * Conexão Postgres (Supabase) compartilhada pelo app.
  *
- * Em dev, o Next.js recarrega módulos a cada save (hot reload). Sem cache no
- * `globalThis`, cada reload abriria uma conexão nova com o arquivo `.db` e
- * vazaria recursos. O truque abaixo guarda a conexão num símbolo global e
- * reaproveita entre reloads.
+ * Em dev (Next.js HMR) e prod (serverless Vercel), o módulo pode ser
+ * avaliado várias vezes — o singleton em globalThis previne abrir conexões
+ * extras a cada hot-reload.
  *
- * Em produção (build), o módulo é avaliado uma única vez — o cache é inerte.
+ * Usa Supabase pooler (transaction mode) — `prepare: false` é necessário
+ * porque pgbouncer com transaction pooling não suporta prepared statements.
  */
-
-const DB_PATH =
-  process.env.DATABASE_URL?.replace(/^file:/, '') ?? './data/financas.db';
 
 declare global {
   // eslint-disable-next-line no-var
-  var __sqlite__: Database.Database | undefined;
+  var __pgClient__: ReturnType<typeof postgres> | undefined;
 }
 
-const sqlite =
-  globalThis.__sqlite__ ??
-  (globalThis.__sqlite__ = new Database(DB_PATH));
+function getConnectionString(): string {
+  // Em testes (Vitest) não há DATABASE_URL; usamos fallback que jamais
+  // conecta de fato (postgres-js só conecta na primeira query). Funções
+  // puras testadas não chegam a fazer query, então isso é seguro.
+  return process.env.DATABASE_URL ?? 'postgresql://invalid_test';
+}
 
-// WAL mode: melhor performance e suporta leitura concorrente com escrita.
-sqlite.pragma('journal_mode = WAL');
-// Foreign keys ligadas: garante referential integrity (sem isso, o SQLite
-// aceita inserir uma transaction com account_id que não existe).
-sqlite.pragma('foreign_keys = ON');
+const client =
+  globalThis.__pgClient__ ??
+  (globalThis.__pgClient__ = postgres(getConnectionString(), {
+    prepare: false,
+    max: 10,
+  }));
 
-export const db = drizzle(sqlite, { schema });
+export const db = drizzle(client, { schema });
 export { schema };

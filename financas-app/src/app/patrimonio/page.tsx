@@ -23,20 +23,24 @@ import {
   computeMonthlyPatrimony,
   getCurrentPatrimony,
 } from '@/lib/patrimony';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 import { formatBRL } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { PatrimonyForm } from '@/components/patrimony-form';
 import { PatrimonyChart } from '@/components/patrimony-chart';
 
-export default function PatrimonioPage() {
-  ensureRecurringGenerated();
+export default async function PatrimonioPage() {
+  const workspaceId = await requireActiveWorkspaceId();
+  await ensureRecurringGenerated(workspaceId);
 
-  const currentSnapshot = getCurrentMonthSnapshot();
+  const currentSnapshot = await getCurrentMonthSnapshot(workspaceId);
   const currentInvestments = currentSnapshot?.investments ?? 0;
 
-  const current = getCurrentPatrimony({ investments: currentInvestments });
-  const monthly = computeMonthlyPatrimony(12);
-  const history = listSnapshots();
+  const [current, monthly, history] = await Promise.all([
+    getCurrentPatrimony(workspaceId, { investments: currentInvestments }),
+    computeMonthlyPatrimony(workspaceId, 12),
+    listSnapshots(workspaceId),
+  ]);
 
   return (
     <div className="flex flex-col gap-6">

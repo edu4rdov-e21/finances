@@ -5,11 +5,20 @@ import { db, schema } from '@/db/client';
 export type CreditCardRow = typeof schema.accounts.$inferSelect;
 export type CardPurchase = typeof schema.cardPurchases.$inferSelect;
 
-export type CardPurchaseSummary = CardPurchase & {
+export type CardPurchaseSummary = {
+  id: string;
+  workspaceId: string;
+  accountId: string;
+  categoryId: string;
+  description: string;
+  totalAmount: number;
+  installments: number;
+  firstInstallmentDate: string;
+  createdAt: string;
+  categoryName: string | null;
   paidCount: number;
   totalCount: number;
   remainingAmount: number;
-  categoryName: string | null;
 };
 
 // Re-exporta a função pura de installments — mantém quem importa daqui sem quebra.
@@ -68,19 +77,21 @@ export function getCardCycle(
   return { prevClosing, nextClosing, nextDue };
 }
 
-/** Cartões de crédito ativos. */
-export function listCreditCards(): CreditCardRow[] {
-  return db
+/** Cartões de crédito ativos do workspace. */
+export async function listCreditCards(
+  workspaceId: string
+): Promise<CreditCardRow[]> {
+  return await db
     .select()
     .from(schema.accounts)
     .where(
       and(
+        eq(schema.accounts.workspaceId, workspaceId),
         eq(schema.accounts.kind, 'credit_card'),
         eq(schema.accounts.archived, 0)
       )
     )
-    .orderBy(schema.accounts.name)
-    .all();
+    .orderBy(schema.accounts.name);
 }
 
 /**
@@ -90,30 +101,39 @@ export function listCreditCards(): CreditCardRow[] {
  * de todas as transactions de despesa do cartão — assim a tela mostra algo
  * mesmo antes de o usuário ajustar /config.
  */
-export function getOpenInvoiceTotal(
+export async function getOpenInvoiceTotal(
+  workspaceId: string,
   cardId: string,
   now: Date = new Date()
-): number {
-  const card = db
+): Promise<number> {
+  const [card] = await db
     .select()
     .from(schema.accounts)
-    .where(eq(schema.accounts.id, cardId))
-    .get();
+    .where(
+      and(
+        eq(schema.accounts.workspaceId, workspaceId),
+        eq(schema.accounts.id, cardId)
+      )
+    )
+    .limit(1);
   if (!card) return 0;
 
   const cycle = getCardCycle(card, now);
-  const allTxs = db
+  const allTxs = await db
     .select({
       amount: schema.transactions.amount,
       date: schema.transactions.date,
       kind: schema.transactions.kind,
     })
     .from(schema.transactions)
-    .where(eq(schema.transactions.accountId, cardId))
-    .all();
+    .where(
+      and(
+        eq(schema.transactions.workspaceId, workspaceId),
+        eq(schema.transactions.accountId, cardId)
+      )
+    );
 
   if (!cycle) {
-    // Sem ciclo — soma despesas confirmadas + pendentes
     return allTxs
       .filter((t) => t.kind === 'expense')
       .reduce((acc, t) => acc + t.amount, 0);
@@ -126,7 +146,7 @@ export function getOpenInvoiceTotal(
     .filter(
       (t) =>
         t.kind === 'expense' &&
-        t.date > fromIso && // > exclusive: dia do prev closing já é de outra fatura
+        t.date > fromIso &&
         t.date <= toIso
     )
     .reduce((acc, t) => acc + t.amount, 0);
@@ -139,10 +159,14 @@ export function getOpenInvoiceTotal(
  * Usa N+1 queries propositalmente — volume baixo, código limpo. Otimizar
  * com window function ou subquery quando virar gargalo (não vai ser logo).
  */
-export function listCardPurchases(cardId: string): CardPurchaseSummary[] {
-  const purchases = db
+export async function listCardPurchases(
+  workspaceId: string,
+  cardId: string
+): Promise<CardPurchaseSummary[]> {
+  const purchases = await db
     .select({
       id: schema.cardPurchases.id,
+      workspaceId: schema.cardPurchases.workspaceId,
       accountId: schema.cardPurchases.accountId,
       categoryId: schema.cardPurchases.categoryId,
       description: schema.cardPurchases.description,
@@ -157,19 +181,24 @@ export function listCardPurchases(cardId: string): CardPurchaseSummary[] {
       schema.categories,
       eq(schema.cardPurchases.categoryId, schema.categories.id)
     )
-    .where(eq(schema.cardPurchases.accountId, cardId))
-    .orderBy(desc(schema.cardPurchases.firstInstallmentDate))
-    .all();
+    .where(
+      and(
+        eq(schema.cardPurchases.workspaceId, workspaceId),
+        eq(schema.cardPurchases.accountId, cardId)
+      )
+    )
+    .orderBy(desc(schema.cardPurchases.firstInstallmentDate));
 
-  return purchases.map((p) => {
-    const txs = db
+  // Agregados por purchase: N+1 query (volume baixo, código limpo)
+  const out: CardPurchaseSummary[] = [];
+  for (const p of purchases) {
+    const txs = await db
       .select({
         amount: schema.transactions.amount,
         status: schema.transactions.status,
       })
       .from(schema.transactions)
-      .where(eq(schema.transactions.cardPurchaseId, p.id))
-      .all();
+      .where(eq(schema.transactions.cardPurchaseId, p.id));
 
     const paidCount = txs.filter((t) => t.status === 'confirmed').length;
     const totalCount = txs.length;
@@ -177,6 +206,7 @@ export function listCardPurchases(cardId: string): CardPurchaseSummary[] {
       .filter((t) => t.status === 'pending')
       .reduce((s, t) => s + t.amount, 0);
 
-    return { ...p, paidCount, totalCount, remainingAmount };
-  });
+    out.push({ ...p, paidCount, totalCount, remainingAmount });
+  }
+  return out;
 }

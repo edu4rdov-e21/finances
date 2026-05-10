@@ -13,12 +13,16 @@ import { cn } from '@/lib/utils';
 import { NewRecurringRuleDialog } from '@/components/new-recurring-rule-dialog';
 import { RecurringRuleRowActions } from '@/components/recurring-rule-row-actions';
 import { ensureRecurringGenerated } from '@/lib/boot';
+import { requireActiveWorkspaceId } from '@/lib/workspace';
 
-export default function RecorrenciasPage() {
-  ensureRecurringGenerated();
-  const rules = listRecurringRules();
-  const accounts = listAccounts();
-  const categories = listCategories();
+export default async function RecorrenciasPage() {
+  const workspaceId = await requireActiveWorkspaceId();
+  await ensureRecurringGenerated(workspaceId);
+  const [rules, accounts, categories] = await Promise.all([
+    listRecurringRules(workspaceId),
+    listAccounts(workspaceId),
+    listCategories(workspaceId),
+  ]);
 
   return (
     <div className="flex flex-col gap-6">
